@@ -193,8 +193,8 @@ def main() -> None:
         help="Path to an existing screenshot (skips capture).",
     )
     parser.add_argument(
-        "--model", type=str, default="gpt-4.1",
-        help="OpenAI vision model (default: gpt-4.1).",
+        "--model", type=str, default="gpt-4o",
+        help="OpenAI vision model (default: gpt-4o).",
     )
     args = parser.parse_args()
 
