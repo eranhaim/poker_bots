@@ -222,7 +222,7 @@ def _validate_no_duplicates(detected: DetectedCards) -> None:
 # ── Main detection function ───────────────────────────────────────────
 def detect_cards(
     image_path: str,
-    model: str = "gpt-4.1",
+    model: str = "gpt-4o",
     api_key: Optional[str] = None,
 ) -> DetectedCards:
     """Send a screenshot to OpenAI Vision and return the detected cards.
@@ -233,7 +233,7 @@ def detect_cards(
         Path to the screenshot PNG file.
     model : str
         OpenAI model to use (must support vision + function calling).
-        Default is 'gpt-4.1' which has the best vision accuracy.
+        Default is 'gpt-4o' which has the best vision accuracy.
     api_key : str, optional
         OpenAI API key. Falls back to the OPENAI_API_KEY env var.
 
