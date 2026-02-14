@@ -12,6 +12,9 @@ build/
 # Screenshots (generated at runtime)
 screenshots/
 
+# Log files
+*.log
+
 # IDE
 .vscode/
 .idea/

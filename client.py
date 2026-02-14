@@ -1,16 +1,20 @@
 """
 Player Client -- runs on each player's computer.
 
-Captures the screen, detects hole cards + community cards via GPT-4o Vision,
-and sends the data to the central Hub server.
+Captures the screen every N seconds, detects hole cards + community cards
+via GPT-4.1 Vision, and sends the data to the central Hub server.
+The hub handles hand detection automatically.
 
 Usage
 -----
-# Manual mode (press Enter to capture):
+# Default: auto-capture every 5 seconds (just run and forget):
     python client.py --name Alice --hub-url http://host:8000
 
-# Auto mode (capture every N seconds):
-    python client.py --name Alice --hub-url http://host:8000 --auto --interval 10
+# Custom interval:
+    python client.py --name Alice --hub-url http://host:8000 --interval 3
+
+# Manual mode (press Enter to capture):
+    python client.py --name Alice --hub-url http://host:8000 --manual
 
 # Process an existing screenshot:
     python client.py --name Alice --hub-url http://host:8000 --image screenshot.png
@@ -35,7 +39,6 @@ from card_detector import detect_cards, DetectedCards
 def send_to_hub(
     hub_url: str,
     player_name: str,
-    hand_id: int,
     detected: DetectedCards,
 ) -> bool:
     """POST the detected cards to the hub. Returns True on success."""
@@ -50,7 +53,6 @@ def send_to_hub(
         "player_name": player_name,
         "hole_cards": hero.cards,
         "community_cards": detected.community_cards,
-        "hand_id": hand_id,
     }
 
     url = hub_url.rstrip("/") + "/hand"
@@ -77,7 +79,6 @@ def process_and_send(
     image_path: str,
     hub_url: str,
     player_name: str,
-    hand_id: int,
     model: str,
 ) -> bool:
     """Capture -> detect -> send pipeline. Returns True on success."""
@@ -89,51 +90,7 @@ def process_and_send(
         print(f"[Client] Card detection failed: {e}")
         return False
 
-    return send_to_hub(hub_url, player_name, hand_id, detected)
-
-
-def run_manual(
-    recorder: ScreenRecorder,
-    hub_url: str,
-    player_name: str,
-    model: str,
-) -> None:
-    """Manual mode: press Enter to capture, 'n' for new hand, 'q' to quit."""
-    hand_id = 1
-    print("\n" + "=" * 50)
-    print(f"  Player Client - {player_name}")
-    print(f"  Hub: {hub_url}")
-    print(f"  Model: {model}")
-    print("  Commands:")
-    print("    Enter  = capture & send")
-    print("    n      = new hand (increment hand_id)")
-    print("    q      = quit")
-    print("=" * 50 + "\n")
-
-    while True:
-        user_input = input(f"[hand #{hand_id}] > ").strip().lower()
-
-        if user_input in ("q", "quit", "exit"):
-            print("Goodbye!")
-            break
-
-        if user_input in ("n", "new", "new_hand"):
-            hand_id += 1
-            print(f"[Client] New hand #{hand_id}")
-            # Notify hub of new hand
-            try:
-                resp = requests.post(
-                    hub_url.rstrip("/") + "/new_hand",
-                    params={"hand_id": hand_id},
-                    timeout=10,
-                )
-                print(f"[Client] Hub new_hand response: {resp.json()}")
-            except Exception as e:
-                print(f"[Client] Could not notify hub: {e}")
-            continue
-
-        image_path = recorder.capture(f"hand{hand_id}")
-        process_and_send(image_path, hub_url, player_name, hand_id, model)
+    return send_to_hub(hub_url, player_name, detected)
 
 
 def run_auto(
@@ -142,24 +99,52 @@ def run_auto(
     player_name: str,
     model: str,
     interval: float,
-    hand_id: int = 1,
 ) -> None:
-    """Auto mode: capture every `interval` seconds."""
+    """Auto mode: capture every `interval` seconds. Default behavior."""
+    capture_num = 0
     print("\n" + "=" * 50)
-    print(f"  Player Client - {player_name} (Auto, {interval}s)")
+    print(f"  Player Client - {player_name}")
     print(f"  Hub: {hub_url}")
     print(f"  Model: {model}")
-    print("  Ctrl+C to stop.")
+    print(f"  Capturing every {interval}s (Ctrl+C to stop)")
     print("=" * 50 + "\n")
 
     try:
         while True:
-            image_path = recorder.capture(f"hand{hand_id}")
-            process_and_send(image_path, hub_url, player_name, hand_id, model)
+            capture_num += 1
+            image_path = recorder.capture(f"cap{capture_num}")
+            process_and_send(image_path, hub_url, player_name, model)
             print(f"[Client] Next capture in {interval}s ...")
             time.sleep(interval)
     except KeyboardInterrupt:
         print("\nStopped.")
+
+
+def run_manual(
+    recorder: ScreenRecorder,
+    hub_url: str,
+    player_name: str,
+    model: str,
+) -> None:
+    """Manual mode: press Enter to capture, 'q' to quit."""
+    capture_num = 0
+    print("\n" + "=" * 50)
+    print(f"  Player Client - {player_name} (Manual)")
+    print(f"  Hub: {hub_url}")
+    print(f"  Model: {model}")
+    print("  Press Enter to capture, 'q' to quit.")
+    print("=" * 50 + "\n")
+
+    while True:
+        user_input = input("> ").strip().lower()
+
+        if user_input in ("q", "quit", "exit"):
+            print("Goodbye!")
+            break
+
+        capture_num += 1
+        image_path = recorder.capture(f"cap{capture_num}")
+        process_and_send(image_path, hub_url, player_name, model)
 
 
 def run_single_image(
@@ -167,18 +152,17 @@ def run_single_image(
     hub_url: str,
     player_name: str,
     model: str,
-    hand_id: int = 1,
 ) -> None:
     """Process a single existing screenshot."""
     if not os.path.exists(image_path):
         print(f"Error: file not found: {image_path}")
         sys.exit(1)
-    process_and_send(image_path, hub_url, player_name, hand_id, model)
+    process_and_send(image_path, hub_url, player_name, model)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Poker player client: capture -> detect -> send to hub."
+        description="Poker player client: auto-captures screen and sends cards to the hub."
     )
     parser.add_argument(
         "--name", type=str, required=True,
@@ -186,15 +170,15 @@ def main() -> None:
     )
     parser.add_argument(
         "--hub-url", type=str, required=True,
-        help="Hub server URL (e.g. http://123.45.67.89:8000).",
+        help="Hub server URL (e.g. http://host:8000 or https://xyz.ngrok-free.app).",
     )
     parser.add_argument(
-        "--auto", action="store_true",
-        help="Auto-capture mode (periodic).",
+        "--manual", action="store_true",
+        help="Manual mode: press Enter to capture instead of auto-capturing.",
     )
     parser.add_argument(
-        "--interval", type=float, default=10.0,
-        help="Seconds between auto-captures (default: 10).",
+        "--interval", type=float, default=5.0,
+        help="Seconds between auto-captures (default: 5).",
     )
     parser.add_argument(
         "--monitor", type=int, default=0,
@@ -209,12 +193,8 @@ def main() -> None:
         help="Path to an existing screenshot (skips capture).",
     )
     parser.add_argument(
-        "--model", type=str, default="gpt-4o",
-        help="OpenAI vision model (default: gpt-4o).",
-    )
-    parser.add_argument(
-        "--hand-id", type=int, default=1,
-        help="Starting hand ID (default: 1).",
+        "--model", type=str, default="gpt-4.1",
+        help="OpenAI vision model (default: gpt-4.1).",
     )
     args = parser.parse_args()
 
@@ -227,16 +207,16 @@ def main() -> None:
 
     # Single image mode
     if args.image:
-        run_single_image(args.image, args.hub_url, args.name, args.model, args.hand_id)
+        run_single_image(args.image, args.hub_url, args.name, args.model)
         return
 
     # Live capture modes
     recorder = ScreenRecorder(save_dir=args.dir, monitor=args.monitor)
 
-    if args.auto:
-        run_auto(recorder, args.hub_url, args.name, args.model, args.interval, args.hand_id)
-    else:
+    if args.manual:
         run_manual(recorder, args.hub_url, args.name, args.model)
+    else:
+        run_auto(recorder, args.hub_url, args.name, args.model, args.interval)
 
 
 if __name__ == "__main__":
