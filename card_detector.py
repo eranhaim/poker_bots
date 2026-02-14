@@ -26,13 +26,15 @@ VALID_CARDS = {f"{r}{s}" for r in VALID_RANKS for s in VALID_SUITS}
 @dataclass
 class PlayerHand:
     seat: int
-    cards: list[str]  # e.g. ["Ah", "Kd"]
+    cards: list[str]              # e.g. ["Ah", "Kd"]
+    stack: Optional[float] = None  # chip stack, e.g. 1500.0
 
 
 @dataclass
 class DetectedCards:
     community_cards: list[str] = field(default_factory=list)  # e.g. ["Ah", "Kd", "Jc"]
     players: list[PlayerHand] = field(default_factory=list)
+    pot_size: Optional[float] = None  # total pot, e.g. 350.0
 
     @property
     def street(self) -> str:
@@ -84,12 +86,19 @@ _TOOLS = [
         "function": {
             "name": "report_cards",
             "description": (
-                "Report the poker cards visible on the screen. "
-                "For each card, provide the rank and suit as separate plain-English fields."
+                "Report the poker cards visible on the screen, "
+                "along with the pot size and each player's chip stack."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "pot_size": {
+                        "type": "number",
+                        "description": (
+                            "The total pot size displayed on the table (as a number). "
+                            "If not visible, use 0."
+                        ),
+                    },
                     "community_cards": {
                         "type": "array",
                         "items": {
@@ -123,6 +132,13 @@ _TOOLS = [
                                     "type": "integer",
                                     "description": "Seat number (1-based, clockwise from bottom).",
                                 },
+                                "stack": {
+                                    "type": "number",
+                                    "description": (
+                                        "The player's chip stack shown near their seat (as a number). "
+                                        "If not visible, use 0."
+                                    ),
+                                },
                                 "card1_rank": {
                                     "type": "string",
                                     "enum": ["2", "3", "4", "5", "6", "7", "8", "9", "10",
@@ -148,7 +164,7 @@ _TOOLS = [
                         "description": "Players whose hole cards are face-up and visible.",
                     },
                 },
-                "required": ["community_cards", "players"],
+                "required": ["community_cards", "players", "pot_size"],
             },
         },
     }
@@ -159,9 +175,11 @@ You are an expert poker card reader with perfect attention to detail.
 You will be shown a screenshot of a poker table.
 
 YOUR TASK:
-1. Look at the community cards (board) in the center of the table.
-2. Look at each player's hole cards (the two cards in front of each player).
-3. For each card, identify its RANK and SUIT separately, then report via the function.
+1. Read the POT SIZE displayed in the center of the table (usually near the board cards).
+2. Look at the community cards (board) in the center of the table.
+3. Look at each player's hole cards (the two cards in front of each player).
+4. Read each player's CHIP STACK (the number shown near their seat).
+5. For each card, identify its RANK and SUIT separately, then report via the function.
 
 HOW TO IDENTIFY CARDS:
 - RANK: Read the number or letter printed in the top-left corner of the card.
@@ -171,6 +189,13 @@ HOW TO IDENTIFY CARDS:
   * Diamonds = red diamond/rhombus shape
   * Clubs = black clover/trefoil shape
   * Spades = black pointed/spade shape
+
+CHIP VALUES:
+- Read the number displayed next to each player as their stack size.
+- Read the pot size number displayed in the center of the table.
+- Report these as plain numbers (e.g. 1500, 350, 10000).
+- Common abbreviations: "1.5k" = 1500, "10k" = 10000. Convert to the full number.
+- If a value is not visible, report 0.
 
 WATCH OUT FOR:
 - 6 vs 9: check which way the number is oriented
@@ -300,6 +325,13 @@ def detect_cards(
     data = json.loads(tool_call.function.arguments)
 
     # ── Build result with validation ──────────────────────────────────
+    pot_size = data.get("pot_size", None)
+    if pot_size is not None:
+        try:
+            pot_size = float(pot_size)
+        except (ValueError, TypeError):
+            pot_size = None
+
     community = []
     for c in data.get("community_cards", []):
         if isinstance(c, dict):
@@ -311,6 +343,13 @@ def detect_cards(
 
     players = []
     for p in data.get("players", []):
+        stack = None
+        if "stack" in p:
+            try:
+                stack = float(p["stack"])
+            except (ValueError, TypeError):
+                stack = None
+
         if "card1_rank" in p:
             # New structured format with separate rank/suit fields
             card1 = _convert_to_treys(p["card1_rank"], p["card1_suit"])
@@ -325,13 +364,14 @@ def detect_cards(
         else:
             print(f"[CardDetector] WARNING: seat {p.get('seat', '?')} missing card data, skipping")
             continue
-        players.append(PlayerHand(seat=p["seat"], cards=cards))
+        players.append(PlayerHand(seat=p["seat"], cards=cards, stack=stack))
 
-    result = DetectedCards(community_cards=community, players=players)
+    result = DetectedCards(community_cards=community, players=players, pot_size=pot_size)
     _validate_no_duplicates(result)
 
+    pot_str = f"  pot={result.pot_size}" if result.pot_size else ""
     print(f"[CardDetector] Detected: board={result.community_cards}  "
-          f"players={[(p.seat, p.cards) for p in result.players]}  "
-          f"street={result.street}")
+          f"players={[(p.seat, p.cards, p.stack) for p in result.players]}  "
+          f"street={result.street}{pot_str}")
 
     return result

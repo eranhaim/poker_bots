@@ -54,16 +54,20 @@ app = FastAPI(title="Poker Equity Hub")
 # ── Request / response models ────────────────────────────────────────
 class HandReport(BaseModel):
     player_name: str
-    hole_cards: list[str]          # e.g. ["Ah", "Kd"]
-    community_cards: list[str]     # e.g. ["Jc", "Ts", "9h"]
-    hand_id: Optional[int] = None  # optional -- hub auto-detects hands if omitted
+    hole_cards: list[str]                  # e.g. ["Ah", "Kd"]
+    community_cards: list[str]             # e.g. ["Jc", "Ts", "9h"]
+    hand_id: Optional[int] = None          # optional -- hub auto-detects hands if omitted
+    stack: Optional[float] = None          # player's chip stack
+    pot_size: Optional[float] = None       # current pot size
 
 
 class StatusResponse(BaseModel):
     hand_id: int
     community_cards: list[str]
-    players: dict[str, list[str]]  # player_name -> hole_cards
-    equity: dict[str, float]       # player_name -> equity %
+    players: dict[str, list[str]]          # player_name -> hole_cards
+    stacks: dict[str, Optional[float]]     # player_name -> chip stack
+    pot_size: Optional[float]
+    equity: dict[str, float]               # player_name -> equity %
     players_connected: int
     last_update: Optional[str]
 
@@ -73,8 +77,10 @@ class HandState:
     def __init__(self) -> None:
         self.hand_id: int = 0
         self.community_cards: list[str] = []
-        self.players: dict[str, list[str]] = {}  # name -> [card1, card2]
-        self.equity: dict[str, float] = {}        # name -> equity (0-1)
+        self.players: dict[str, list[str]] = {}    # name -> [card1, card2]
+        self.stacks: dict[str, Optional[float]] = {}  # name -> stack
+        self.pot_size: Optional[float] = None
+        self.equity: dict[str, float] = {}          # name -> equity (0-1)
         self.last_update: Optional[str] = None
         self._lock = threading.Lock()
 
@@ -83,6 +89,8 @@ class HandState:
             self.hand_id = hand_id
             self.community_cards = []
             self.players = {}
+            self.stacks = {}
+            self.pot_size = None
             self.equity = {}
             self.last_update = None
         logger.info("=" * 45)
@@ -168,6 +176,8 @@ class HandState:
             if is_new_hand:
                 self.community_cards = []
                 self.players = {}
+                self.stacks = {}
+                self.pot_size = None
                 self.equity = {}
 
             # First hand auto-start (hub just started, hand_id is 0)
@@ -201,10 +211,15 @@ class HandState:
                             " ".join(self.community_cards),
                         )
 
-            # Update player hole cards
+            # Update player hole cards and stack
             is_new_player = report.player_name not in self.players
             old_cards = self.players.get(report.player_name)
             self.players[report.player_name] = report.hole_cards
+            if report.stack is not None:
+                self.stacks[report.player_name] = report.stack
+            # Update pot size (use latest reported value)
+            if report.pot_size is not None:
+                self.pot_size = report.pot_size
             self.last_update = datetime.now().strftime("%H:%M:%S")
 
         # Log the report
@@ -269,38 +284,44 @@ class HandState:
             hand_id = self.hand_id
             community = list(self.community_cards)
             players = dict(self.players)
+            stacks = dict(self.stacks)
+            pot = self.pot_size
             equity = dict(self.equity)
             n_players = len(players)
 
         board_str = " ".join(community) if community else "(preflop)"
         n_board = len(community)
         street = {0: "Preflop", 3: "Flop", 4: "Turn", 5: "River"}.get(n_board, f"{n_board} cards")
+        pot_str = f"Pot: {pot:,.0f}" if pot else "Pot: --"
 
         logger.info("")
-        logger.info("+" + "=" * 50 + "+")
-        logger.info("|  HAND #%-5d  |  %-8s  |  Players: %d", hand_id, street, n_players)
-        logger.info("+" + "-" * 50 + "+")
-        logger.info("|  Board: %-41s|", board_str)
-        logger.info("+" + "-" * 50 + "+")
+        logger.info("+" + "=" * 58 + "+")
+        logger.info("|  HAND #%-5d  |  %-8s  |  Players: %d  |  %-10s|",
+                     hand_id, street, n_players, pot_str)
+        logger.info("+" + "-" * 58 + "+")
+        logger.info("|  Board: %-49s|", board_str)
+        logger.info("+" + "-" * 58 + "+")
 
         if not players:
-            logger.info("|  (no players have reported yet)%19s|", "")
+            logger.info("|  (no players have reported yet)%27s|", "")
         else:
             for name, cards in players.items():
                 cards_str = " ".join(cards)
+                stack = stacks.get(name)
+                stack_str = f"{stack:,.0f}" if stack is not None else "--"
                 eq = equity.get(name)
                 if eq is not None:
                     logger.info(
-                        "|  %-14s  %-6s  |  Equity: %5.1f%%  %6s|",
-                        name, cards_str, eq * 100, "",
+                        "|  %-12s  %-6s  |  Stack: %8s  |  Equity: %5.1f%%  |",
+                        name, cards_str, stack_str, eq * 100,
                     )
                 else:
                     logger.info(
-                        "|  %-14s  %-6s  |  (waiting for more)%3s|",
-                        name, cards_str, "",
+                        "|  %-12s  %-6s  |  Stack: %8s  |  (waiting)       |",
+                        name, cards_str, stack_str,
                     )
 
-        logger.info("+" + "=" * 50 + "+")
+        logger.info("+" + "=" * 58 + "+")
         logger.info("")
 
     def get_status(self) -> StatusResponse:
@@ -309,6 +330,8 @@ class HandState:
                 hand_id=self.hand_id,
                 community_cards=list(self.community_cards),
                 players={k: list(v) for k, v in self.players.items()},
+                stacks=dict(self.stacks),
+                pot_size=self.pot_size,
                 equity={k: round(v * 100, 1) for k, v in self.equity.items()},
                 players_connected=len(self.players),
                 last_update=self.last_update,

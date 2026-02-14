@@ -53,13 +53,16 @@ def send_to_hub(
         "player_name": player_name,
         "hole_cards": hero.cards,
         "community_cards": detected.community_cards,
+        "stack": hero.stack,
+        "pot_size": detected.pot_size,
     }
 
     url = hub_url.rstrip("/") + "/hand"
+    headers = {"ngrok-skip-browser-warning": "true"}
     print(f"[Client] Sending to hub: {payload}")
 
     try:
-        resp = requests.post(url, json=payload, timeout=10)
+        resp = requests.post(url, json=payload, headers=headers, timeout=10)
         resp.raise_for_status()
         data = resp.json()
         print(f"[Client] Hub response: {data}")
