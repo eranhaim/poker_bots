@@ -35,6 +35,7 @@ class DetectedCards:
     community_cards: list[str] = field(default_factory=list)  # e.g. ["Ah", "Kd", "Jc"]
     players: list[PlayerHand] = field(default_factory=list)
     pot_size: Optional[float] = None  # total pot, e.g. 350.0
+    total_players: Optional[int] = None  # total players with cards (face-up or face-down)
 
     @property
     def street(self) -> str:
@@ -92,6 +93,15 @@ _TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "total_players_at_table": {
+                        "type": "integer",
+                        "description": (
+                            "The total number of players who have cards in front of them "
+                            "(face-up OR face-down). Count ALL seated players who appear "
+                            "to be in the hand, even if you cannot read their cards. "
+                            "Do NOT count empty seats or players who have folded."
+                        ),
+                    },
                     "pot_size": {
                         "type": "number",
                         "description": (
@@ -164,7 +174,7 @@ _TOOLS = [
                         "description": "Players whose hole cards are face-up and visible.",
                     },
                 },
-                "required": ["community_cards", "players", "pot_size"],
+                "required": ["community_cards", "players", "pot_size", "total_players_at_table"],
             },
         },
     }
@@ -175,11 +185,14 @@ You are an expert poker card reader with perfect attention to detail.
 You will be shown a screenshot of a poker table.
 
 YOUR TASK:
-1. Read the POT SIZE displayed in the center of the table (usually near the board cards).
-2. Look at the community cards (board) in the center of the table.
-3. Look at each player's hole cards (the two cards in front of each player).
-4. Read each player's CHIP STACK (the number shown near their seat).
-5. For each card, identify its RANK and SUIT separately, then report via the function.
+1. Count ALL players who have cards in front of them (face-up OR face-down).
+   Include players whose cards you cannot read. Do NOT count empty seats or folded players.
+   Report this count as total_players_at_table.
+2. Read the POT SIZE displayed in the center of the table (usually near the board cards).
+3. Look at the community cards (board) in the center of the table.
+4. Look at each player's hole cards (the two cards in front of each player).
+5. Read each player's CHIP STACK (the number shown near their seat).
+6. For each card, identify its RANK and SUIT separately, then report via the function.
 
 HOW TO IDENTIFY CARDS:
 - RANK: Read the number or letter printed in the top-left corner of the card.
@@ -325,6 +338,13 @@ def detect_cards(
     data = json.loads(tool_call.function.arguments)
 
     # ── Build result with validation ──────────────────────────────────
+    total_players = data.get("total_players_at_table", None)
+    if total_players is not None:
+        try:
+            total_players = int(total_players)
+        except (ValueError, TypeError):
+            total_players = None
+
     pot_size = data.get("pot_size", None)
     if pot_size is not None:
         try:
@@ -366,12 +386,16 @@ def detect_cards(
             continue
         players.append(PlayerHand(seat=p["seat"], cards=cards, stack=stack))
 
-    result = DetectedCards(community_cards=community, players=players, pot_size=pot_size)
+    result = DetectedCards(
+        community_cards=community, players=players,
+        pot_size=pot_size, total_players=total_players,
+    )
     _validate_no_duplicates(result)
 
     pot_str = f"  pot={result.pot_size}" if result.pot_size else ""
+    tp_str = f"  total_players={result.total_players}" if result.total_players else ""
     print(f"[CardDetector] Detected: board={result.community_cards}  "
           f"players={[(p.seat, p.cards, p.stack) for p in result.players]}  "
-          f"street={result.street}{pot_str}")
+          f"street={result.street}{pot_str}{tp_str}")
 
     return result

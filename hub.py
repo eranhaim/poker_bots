@@ -24,7 +24,8 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 
-from equity_calculator import calculate_equity, format_equity_table
+from equity_calculator import calculate_equity, calculate_equity_with_unknowns, format_equity_table
+from strategy import recommend as strategy_recommend, Recommendation
 
 # ── Logging setup ─────────────────────────────────────────────────────
 logger = logging.getLogger("hub")
@@ -59,6 +60,14 @@ class HandReport(BaseModel):
     hand_id: Optional[int] = None          # optional -- hub auto-detects hands if omitted
     stack: Optional[float] = None          # player's chip stack
     pot_size: Optional[float] = None       # current pot size
+    total_players: Optional[int] = None    # total players with cards (from AI vision)
+
+
+class RecommendationResponse(BaseModel):
+    action: str
+    sizing: Optional[float] = None
+    reasoning: str
+    confidence: str
 
 
 class StatusResponse(BaseModel):
@@ -68,6 +77,9 @@ class StatusResponse(BaseModel):
     stacks: dict[str, Optional[float]]     # player_name -> chip stack
     pot_size: Optional[float]
     equity: dict[str, float]               # player_name -> equity %
+    total_players: Optional[int]           # agreed total (from unanimous vote)
+    unknown_players: int                   # total - known
+    recommendations: dict[str, RecommendationResponse]  # player_name -> recommendation
     players_connected: int
     last_update: Optional[str]
 
@@ -81,6 +93,9 @@ class HandState:
         self.stacks: dict[str, Optional[float]] = {}  # name -> stack
         self.pot_size: Optional[float] = None
         self.equity: dict[str, float] = {}          # name -> equity (0-1)
+        self.total_players_votes: dict[str, int] = {}  # name -> reported total
+        self.total_players: Optional[int] = None       # agreed-upon count
+        self.recommendations: dict[str, Recommendation] = {}  # name -> rec
         self.last_update: Optional[str] = None
         self._lock = threading.Lock()
 
@@ -92,6 +107,9 @@ class HandState:
             self.stacks = {}
             self.pot_size = None
             self.equity = {}
+            self.total_players_votes = {}
+            self.total_players = None
+            self.recommendations = {}
             self.last_update = None
         logger.info("=" * 45)
         logger.info("NEW HAND #%d", hand_id)
@@ -179,6 +197,9 @@ class HandState:
                 self.stacks = {}
                 self.pot_size = None
                 self.equity = {}
+                self.total_players_votes = {}
+                self.total_players = None
+                self.recommendations = {}
 
             # First hand auto-start (hub just started, hand_id is 0)
             if self.hand_id == 0:
@@ -220,6 +241,26 @@ class HandState:
             # Update pot size (use latest reported value)
             if report.pot_size is not None:
                 self.pot_size = report.pot_size
+
+            # Update total-players vote (unanimous consensus)
+            if report.total_players is not None:
+                self.total_players_votes[report.player_name] = report.total_players
+                votes = set(self.total_players_votes.values())
+                if len(votes) == 1:
+                    agreed = votes.pop()
+                    if agreed != self.total_players:
+                        self.total_players = agreed
+                        logger.info(
+                            "TOTAL PLAYERS agreed: %d (unanimous from %d client(s))",
+                            agreed, len(self.total_players_votes),
+                        )
+                else:
+                    logger.warning(
+                        "TOTAL PLAYERS disagreement: votes=%s -- keeping %s",
+                        dict(self.total_players_votes),
+                        self.total_players if self.total_players else "unknown",
+                    )
+
             self.last_update = datetime.now().strftime("%H:%M:%S")
 
         # Log the report
@@ -251,9 +292,17 @@ class HandState:
         with self._lock:
             community = list(self.community_cards)
             players_snapshot = dict(self.players)
+            stacks_snapshot = dict(self.stacks)
+            pot = self.pot_size
+            total_pl = self.total_players
 
-        if len(players_snapshot) < 2:
-            # Not enough players for equity -- _print_state will still show what we have
+        n_known = len(players_snapshot)
+        n_unknown = max(0, total_pl - n_known) if total_pl is not None else 0
+
+        # Need at least 1 known player + at least 1 other (known or unknown)
+        if n_known == 0:
+            return
+        if n_known < 2 and n_unknown == 0:
             return
 
         # Build input for equity calculator
@@ -264,19 +313,53 @@ class HandState:
         ]
 
         try:
-            equities = calculate_equity(
-                community_cards=community,
-                player_hands=player_hands,
-            )
+            if n_unknown > 0:
+                equities = calculate_equity_with_unknowns(
+                    community_cards=community,
+                    player_hands=player_hands,
+                    num_unknown=n_unknown,
+                )
+            else:
+                equities = calculate_equity(
+                    community_cards=community,
+                    player_hands=player_hands,
+                )
         except Exception as e:
             logger.error("Equity calculation failed: %s", e)
             return
 
-        # Store equity by player name
+        # Determine street for strategy
+        n_board = len(community)
+        street = {0: "preflop", 3: "flop", 4: "turn", 5: "river"}.get(n_board, "unknown")
+
+        # Store equity by player name and generate recommendations
         with self._lock:
             self.equity = {}
-            for eq, name in zip(equities, player_names):
-                self.equity[name] = eq.equity
+            self.recommendations = {}
+            for eq in equities:
+                if eq.seat == -1:
+                    # Aggregate unknown-player equity
+                    self.equity["Unknown"] = eq.equity
+                    continue
+                # Map seat index back to player name
+                idx = eq.seat - 1
+                if 0 <= idx < len(player_names):
+                    name = player_names[idx]
+                    self.equity[name] = eq.equity
+
+                    # Strategy recommendation
+                    try:
+                        rec = strategy_recommend(
+                            player_name=name,
+                            equity=eq.equity,
+                            pot_size=pot,
+                            stack=stacks_snapshot.get(name),
+                            street=street,
+                            num_unknown=n_unknown,
+                        )
+                        self.recommendations[name] = rec
+                    except Exception as e:
+                        logger.error("Strategy recommendation failed for %s: %s", name, e)
 
     def _print_state(self) -> None:
         """Print a full snapshot of the current hand to the console."""
@@ -287,45 +370,88 @@ class HandState:
             stacks = dict(self.stacks)
             pot = self.pot_size
             equity = dict(self.equity)
-            n_players = len(players)
+            total_pl = self.total_players
+            recs = dict(self.recommendations)
+            n_known = len(players)
+
+        n_unknown = max(0, total_pl - n_known) if total_pl is not None else 0
+        n_total = total_pl if total_pl is not None else n_known
 
         board_str = " ".join(community) if community else "(preflop)"
         n_board = len(community)
         street = {0: "Preflop", 3: "Flop", 4: "Turn", 5: "River"}.get(n_board, f"{n_board} cards")
         pot_str = f"Pot: {pot:,.0f}" if pot else "Pot: --"
+        players_str = f"{n_known}/{n_total}" if n_unknown > 0 else str(n_known)
 
         logger.info("")
-        logger.info("+" + "=" * 58 + "+")
-        logger.info("|  HAND #%-5d  |  %-8s  |  Players: %d  |  %-10s|",
-                     hand_id, street, n_players, pot_str)
-        logger.info("+" + "-" * 58 + "+")
-        logger.info("|  Board: %-49s|", board_str)
-        logger.info("+" + "-" * 58 + "+")
+        logger.info("+" + "=" * 78 + "+")
+        logger.info("|  HAND #%-5d  |  %-8s  |  Players: %-5s |  %-10s|%14s|",
+                     hand_id, street, players_str, pot_str,
+                     f"{n_unknown} unknown" if n_unknown > 0 else "")
+        logger.info("+" + "-" * 78 + "+")
+        logger.info("|  Board: %-69s|", board_str)
+        logger.info("+" + "-" * 78 + "+")
 
-        if not players:
-            logger.info("|  (no players have reported yet)%27s|", "")
+        if not players and n_unknown == 0:
+            logger.info("|  (no players have reported yet)%-47s|", "")
         else:
             for name, cards in players.items():
                 cards_str = " ".join(cards)
                 stack = stacks.get(name)
                 stack_str = f"{stack:,.0f}" if stack is not None else "--"
                 eq = equity.get(name)
+                rec = recs.get(name)
+                rec_str = rec.action if rec else ""
+                if rec and rec.sizing is not None:
+                    rec_str += f" {rec.sizing:,.0f}"
+
                 if eq is not None:
                     logger.info(
-                        "|  %-12s  %-6s  |  Stack: %8s  |  Equity: %5.1f%%  |",
-                        name, cards_str, stack_str, eq * 100,
+                        "|  %-12s  %-6s  |  Stack: %8s  |  Equity: %5.1f%%  |  %-12s|",
+                        name, cards_str, stack_str, eq * 100, rec_str,
                     )
                 else:
                     logger.info(
-                        "|  %-12s  %-6s  |  Stack: %8s  |  (waiting)       |",
-                        name, cards_str, stack_str,
+                        "|  %-12s  %-6s  |  Stack: %8s  |  (waiting)       |  %-12s|",
+                        name, cards_str, stack_str, "",
                     )
 
-        logger.info("+" + "=" * 58 + "+")
+            # Show unknown player aggregate
+            if n_unknown > 0:
+                unknown_eq = equity.get("Unknown")
+                if unknown_eq is not None:
+                    logger.info(
+                        "|  %-12s  %-6s  |  Stack: %8s  |  Equity: %5.1f%%  |  %-12s|",
+                        f"Unknown({n_unknown})", "?? ??", "--", unknown_eq * 100, "--",
+                    )
+                else:
+                    logger.info(
+                        "|  %-12s  %-6s  |  Stack: %8s  |  (waiting)       |  %-12s|",
+                        f"Unknown({n_unknown})", "?? ??", "--", "",
+                    )
+
+        logger.info("+" + "=" * 78 + "+")
+
+        # Print strategy reasoning below the table
+        if recs:
+            logger.info("  Strategy:")
+            for name, rec in recs.items():
+                logger.info("    %-12s  %s  [%s]", name, rec.reasoning, rec.confidence)
+
         logger.info("")
 
     def get_status(self) -> StatusResponse:
         with self._lock:
+            n_known = len(self.players)
+            n_unknown = max(0, self.total_players - n_known) if self.total_players else 0
+            recs_resp: dict[str, RecommendationResponse] = {}
+            for name, rec in self.recommendations.items():
+                recs_resp[name] = RecommendationResponse(
+                    action=rec.action,
+                    sizing=rec.sizing,
+                    reasoning=rec.reasoning,
+                    confidence=rec.confidence,
+                )
             return StatusResponse(
                 hand_id=self.hand_id,
                 community_cards=list(self.community_cards),
@@ -333,7 +459,10 @@ class HandState:
                 stacks=dict(self.stacks),
                 pot_size=self.pot_size,
                 equity={k: round(v * 100, 1) for k, v in self.equity.items()},
-                players_connected=len(self.players),
+                total_players=self.total_players,
+                unknown_players=n_unknown,
+                recommendations=recs_resp,
+                players_connected=n_known,
                 last_update=self.last_update,
             )
 

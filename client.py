@@ -55,6 +55,7 @@ def send_to_hub(
         "community_cards": detected.community_cards,
         "stack": hero.stack,
         "pot_size": detected.pot_size,
+        "total_players": detected.total_players,
     }
 
     url = hub_url.rstrip("/") + "/hand"
