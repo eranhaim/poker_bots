@@ -149,6 +149,14 @@ _TOOLS = [
                                         "If not visible, use 0."
                                     ),
                                 },
+                                "card1_description": {
+                                    "type": "string",
+                                    "description": (
+                                        "Describe the LEFT card: what color is the suit symbol "
+                                        "(red or black)? What shape is it? What rank is shown? "
+                                        "Example: 'Black clover symbol, number 7'"
+                                    ),
+                                },
                                 "card1_rank": {
                                     "type": "string",
                                     "enum": ["2", "3", "4", "5", "6", "7", "8", "9", "10",
@@ -157,6 +165,14 @@ _TOOLS = [
                                 "card1_suit": {
                                     "type": "string",
                                     "enum": ["Hearts", "Diamonds", "Clubs", "Spades"],
+                                },
+                                "card2_description": {
+                                    "type": "string",
+                                    "description": (
+                                        "Describe the RIGHT card: what color is the suit symbol "
+                                        "(red or black)? What shape is it? What rank is shown? "
+                                        "Example: 'Red diamond shape, number 9'"
+                                    ),
                                 },
                                 "card2_rank": {
                                     "type": "string",
@@ -168,8 +184,9 @@ _TOOLS = [
                                     "enum": ["Hearts", "Diamonds", "Clubs", "Spades"],
                                 },
                             },
-                            "required": ["seat", "card1_rank", "card1_suit",
-                                         "card2_rank", "card2_suit"],
+                            "required": ["seat",
+                                         "card1_description", "card1_rank", "card1_suit",
+                                         "card2_description", "card2_rank", "card2_suit"],
                         },
                         "description": "Players whose hole cards are face-up and visible.",
                     },
@@ -194,14 +211,27 @@ YOUR TASK:
 5. Read each player's CHIP STACK (the number shown near their seat).
 6. For each card, identify its RANK and SUIT separately, then report via the function.
 
-HOW TO IDENTIFY CARDS:
-- RANK: Read the number or letter printed in the top-left corner of the card.
+CRITICAL -- READ CARDS ONE AT A TIME:
+- For each pair of hole cards, read the LEFT card FIRST, then the RIGHT card.
+- For each individual card: look at THAT card's rank AND THAT card's suit symbol.
+- Do NOT read all ranks first and then all suits. Read rank+suit together for each card.
+- card1 = the LEFT card. card2 = the RIGHT card.
+- Before reporting, describe each card to yourself: "The left card has [rank] and [suit symbol]."
+- DOUBLE CHECK: look at each card's suit symbol ONE MORE TIME to make sure you did not
+  accidentally swap the suits between the two cards. This is the most common mistake.
+
+HOW TO IDENTIFY SUITS (look at the symbol on EACH card individually):
+- Hearts = RED heart shape (rounded bumps at top, point at bottom)
+- Diamonds = RED diamond/rhombus shape (angular, like a tilted square)
+- Clubs = BLACK clover/trefoil shape (three rounded lobes)
+- Spades = BLACK pointed shape (single point at top, rounded bottom)
+- RED suits: Hearts, Diamonds. BLACK suits: Clubs, Spades.
+- If a card's symbol is RED, it MUST be Hearts or Diamonds.
+- If a card's symbol is BLACK, it MUST be Clubs or Spades.
+
+HOW TO IDENTIFY RANKS:
+- Read the number or letter printed in the top-left corner of the card.
   Possible values: 2, 3, 4, 5, 6, 7, 8, 9, 10, Jack, Queen, King, Ace
-- SUIT: Look at the symbol printed on the card.
-  * Hearts = red heart shape
-  * Diamonds = red diamond/rhombus shape
-  * Clubs = black clover/trefoil shape
-  * Spades = black pointed/spade shape
 
 CHIP VALUES:
 - Read the number displayed next to each player as their stack size.
@@ -211,6 +241,8 @@ CHIP VALUES:
 - If a value is not visible, report 0.
 
 WATCH OUT FOR:
+- SUIT SWAPPING: the #1 error is assigning the wrong suit to the wrong card.
+  Look at the suit symbol ON each card individually. Do not mix them up.
 - 6 vs 9: check which way the number is oriented
 - Clubs vs Spades: clubs have rounded lobes (like a clover), spades have a single point at the top
 - Hearts vs Diamonds: hearts are rounded at the top, diamonds are angular
@@ -255,6 +287,23 @@ def _validate_no_duplicates(detected: DetectedCards) -> None:
         if c in seen:
             raise ValueError(f"Duplicate card detected: {c}")
         seen.add(c)
+
+
+_RED_SUITS = {"h", "d"}
+_BLACK_SUITS = {"c", "s"}
+
+
+def _suit_color_check(card1: str, card2: str, seat: int) -> None:
+    """Log a warning if the suit colors look suspicious (possible swap)."""
+    suit1 = card1[-1]
+    suit2 = card2[-1]
+    color1 = "red" if suit1 in _RED_SUITS else "black"
+    color2 = "red" if suit2 in _RED_SUITS else "black"
+    if color1 != color2:
+        # One red, one black -- most common swap scenario.
+        # Can't auto-correct but worth flagging for awareness.
+        print(f"[CardDetector] Seat {seat}: {card1}({color1}) {card2}({color2}) "
+              f"-- mixed colors, verify suits are not swapped")
 
 
 # ── Main detection function ───────────────────────────────────────────
@@ -375,6 +424,14 @@ def detect_cards(
             card1 = _convert_to_treys(p["card1_rank"], p["card1_suit"])
             card2 = _convert_to_treys(p["card2_rank"], p["card2_suit"])
             cards = [card1, card2]
+            # Log the model's per-card descriptions for debugging
+            desc1 = p.get("card1_description", "")
+            desc2 = p.get("card2_description", "")
+            if desc1 or desc2:
+                print(f"[CardDetector] Seat {p['seat']} card descriptions: "
+                      f"LEFT=\"{desc1}\" RIGHT=\"{desc2}\"")
+            # Color sanity check: red suits (h,d) vs black suits (c,s)
+            _suit_color_check(card1, card2, p['seat'])
         elif "cards" in p:
             # Fallback: old format with card strings
             cards = [_validate_card(c) for c in p["cards"]]
