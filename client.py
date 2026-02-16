@@ -2,16 +2,23 @@
 Player Client -- runs on each player's computer.
 
 Captures the screen every N seconds, detects hole cards + community cards
-via GPT-4.1 Vision, and sends the data to the central Hub server.
+via GPT-4o Vision, and sends the data to the central Hub server.
 The hub handles hand detection automatically.
+
+Optionally, with --auto-play, the client will automatically execute the
+hub's recommended action (Fold, Check, Call, Raise, etc.) on the ClubGG
+window using visual button matching.
 
 Usage
 -----
 # Default: auto-capture every 5 seconds (just run and forget):
     python client.py --name Alice --hub-url http://host:8000
 
-# Custom interval:
-    python client.py --name Alice --hub-url http://host:8000 --interval 3
+# With auto-play enabled (executes recommendations automatically):
+    python client.py --name Alice --hub-url http://host:8000 --auto-play
+
+# Custom interval and action delay:
+    python client.py --name Alice --hub-url http://host:8000 --auto-play --action-delay 2.0
 
 # Manual mode (press Enter to capture):
     python client.py --name Alice --hub-url http://host:8000 --manual
@@ -40,13 +47,13 @@ def send_to_hub(
     hub_url: str,
     player_name: str,
     detected: DetectedCards,
-) -> bool:
-    """POST the detected cards to the hub. Returns True on success."""
+) -> dict | None:
+    """POST the detected cards to the hub. Returns the response dict, or None on failure."""
     # The client always sends the first player's hole cards it finds.
     # In a single-player screen, there should be exactly 1 player (the hero).
     if not detected.players:
         print("[Client] No hole cards detected in screenshot.")
-        return False
+        return None
 
     hero = detected.players[0]
     payload = {
@@ -71,16 +78,16 @@ def send_to_hub(
         resp.raise_for_status()
         data = resp.json()
         print(f"[Client] Hub response: {data}")
-        return True
+        return data
     except requests.ConnectionError:
         print(f"[Client] ERROR: Cannot reach hub at {url}")
-        return False
+        return None
     except requests.HTTPError as e:
         print(f"[Client] ERROR: Hub returned {e.response.status_code}: {e.response.text}")
-        return False
+        return None
     except Exception as e:
         print(f"[Client] ERROR: {e}")
-        return False
+        return None
 
 
 def process_and_send(
@@ -88,17 +95,50 @@ def process_and_send(
     hub_url: str,
     player_name: str,
     model: str,
-) -> bool:
-    """Capture -> detect -> send pipeline. Returns True on success."""
+) -> dict | None:
+    """Capture -> detect -> send pipeline. Returns hub response dict or None."""
     print(f"\n[Client] Analysing: {image_path}  (model: {model})")
 
     try:
         detected = detect_cards(image_path, model=model)
     except Exception as e:
         print(f"[Client] Card detection failed: {e}")
-        return False
+        return None
 
     return send_to_hub(hub_url, player_name, detected)
+
+
+def _maybe_auto_play(hub_response: dict | None, auto_play: bool, action_delay: float) -> None:
+    """If auto-play is enabled and the hub returned a recommendation, execute it."""
+    if not auto_play or hub_response is None:
+        return
+
+    rec = hub_response.get("recommendation")
+    if rec is None:
+        print("[Client] No recommendation from hub yet (need more players)")
+        return
+
+    is_folded = hub_response.get("is_folded", False)
+    if is_folded:
+        print("[Client] Player is folded -- skipping auto-play")
+        return
+
+    action = rec.get("action", "")
+    sizing = rec.get("sizing")
+    confidence = rec.get("confidence", "?")
+
+    print(f"[Client] AUTO-PLAY: {action}"
+          f"{f' {sizing}' if sizing is not None else ''}"
+          f"  [{confidence}]")
+
+    try:
+        from automator import execute_action
+        execute_action(action, sizing=sizing, delay=action_delay)
+    except ImportError:
+        print("[Client] ERROR: automator module not found. "
+              "Make sure automator.py is in the same directory.")
+    except Exception as e:
+        print(f"[Client] ERROR executing action: {e}")
 
 
 def run_auto(
@@ -107,21 +147,28 @@ def run_auto(
     player_name: str,
     model: str,
     interval: float,
+    auto_play: bool = False,
+    action_delay: float = 1.0,
 ) -> None:
     """Auto mode: capture every `interval` seconds. Default behavior."""
     capture_num = 0
+    play_mode = "AUTO-PLAY" if auto_play else "observe-only"
     print("\n" + "=" * 50)
     print(f"  Player Client - {player_name}")
     print(f"  Hub: {hub_url}")
     print(f"  Model: {model}")
+    print(f"  Mode: {play_mode}")
     print(f"  Capturing every {interval}s (Ctrl+C to stop)")
+    if auto_play:
+        print(f"  Action delay: {action_delay}s")
     print("=" * 50 + "\n")
 
     try:
         while True:
             capture_num += 1
             image_path = recorder.capture(f"cap{capture_num}")
-            process_and_send(image_path, hub_url, player_name, model)
+            hub_response = process_and_send(image_path, hub_url, player_name, model)
+            _maybe_auto_play(hub_response, auto_play, action_delay)
             print(f"[Client] Next capture in {interval}s ...")
             time.sleep(interval)
     except KeyboardInterrupt:
@@ -204,6 +251,14 @@ def main() -> None:
         "--model", type=str, default="gpt-4o",
         help="OpenAI vision model (default: gpt-4o).",
     )
+    parser.add_argument(
+        "--auto-play", action="store_true",
+        help="Automatically execute the hub's recommended action on ClubGG.",
+    )
+    parser.add_argument(
+        "--action-delay", type=float, default=1.0,
+        help="Seconds to wait before clicking a button in auto-play mode (default: 1.0).",
+    )
     args = parser.parse_args()
 
     # Verify API key
@@ -224,7 +279,11 @@ def main() -> None:
     if args.manual:
         run_manual(recorder, args.hub_url, args.name, args.model)
     else:
-        run_auto(recorder, args.hub_url, args.name, args.model, args.interval)
+        run_auto(
+            recorder, args.hub_url, args.name, args.model, args.interval,
+            auto_play=args.auto_play,
+            action_delay=args.action_delay,
+        )
 
 
 if __name__ == "__main__":

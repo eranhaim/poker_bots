@@ -583,7 +583,27 @@ def post_hand(report: HandReport, request: Request):
         raise HTTPException(status_code=400, detail="hand_id must be >= 1")
 
     state.update(report, client_ip)
-    return {"status": "ok", "hand_id": state.hand_id}
+
+    # Return recommendation for this player (if available)
+    rec_data = None
+    with state._lock:
+        rec = state.recommendations.get(report.player_name)
+        if rec:
+            rec_data = {
+                "action": rec.action,
+                "sizing": rec.sizing,
+                "reasoning": rec.reasoning,
+                "confidence": rec.confidence,
+            }
+        # Also report if this player is folded
+        is_folded = report.player_name in state.folded_players
+
+    return {
+        "status": "ok",
+        "hand_id": state.hand_id,
+        "recommendation": rec_data,
+        "is_folded": is_folded,
+    }
 
 
 @app.post("/new_hand")
