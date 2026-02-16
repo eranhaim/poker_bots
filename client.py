@@ -56,6 +56,10 @@ def send_to_hub(
         "stack": hero.stack,
         "pot_size": detected.pot_size,
         "total_players": detected.total_players,
+        "table_players": [
+            {"name": tp.name, "status": tp.status, "stack": tp.stack}
+            for tp in detected.table_players
+        ],
     }
 
     url = hub_url.rstrip("/") + "/hand"

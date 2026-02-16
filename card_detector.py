@@ -31,9 +31,17 @@ class PlayerHand:
 
 
 @dataclass
+class TablePlayer:
+    name: str
+    status: str                    # "active" or "folded"
+    stack: Optional[float] = None
+
+
+@dataclass
 class DetectedCards:
     community_cards: list[str] = field(default_factory=list)  # e.g. ["Ah", "Kd", "Jc"]
     players: list[PlayerHand] = field(default_factory=list)
+    table_players: list[TablePlayer] = field(default_factory=list)
     pot_size: Optional[float] = None  # total pot, e.g. 350.0
     total_players: Optional[int] = None  # total players with cards (face-up or face-down)
 
@@ -190,8 +198,45 @@ _TOOLS = [
                         },
                         "description": "Players whose hole cards are face-up and visible.",
                     },
+                    "table_players": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {
+                                    "type": "string",
+                                    "description": (
+                                        "The player's display name as shown on screen "
+                                        "(read the text label next to their seat)."
+                                    ),
+                                },
+                                "status": {
+                                    "type": "string",
+                                    "enum": ["active", "folded"],
+                                    "description": (
+                                        "active = player has cards (face-up OR face-down card backs). "
+                                        "folded = player's name is visible but they have NO cards, "
+                                        "or their cards are greyed-out / shaded."
+                                    ),
+                                },
+                                "stack": {
+                                    "type": "number",
+                                    "description": (
+                                        "The player's chip stack shown near their name. "
+                                        "If not visible, use 0."
+                                    ),
+                                },
+                            },
+                            "required": ["name", "status"],
+                        },
+                        "description": (
+                            "ALL players visible at the table -- both active and folded. "
+                            "Read every player name you can see and report their status."
+                        ),
+                    },
                 },
-                "required": ["community_cards", "players", "pot_size", "total_players_at_table"],
+                "required": ["community_cards", "players", "pot_size",
+                             "total_players_at_table", "table_players"],
             },
         },
     }
@@ -202,14 +247,17 @@ You are an expert poker card reader with perfect attention to detail.
 You will be shown a screenshot of a poker table.
 
 YOUR TASK:
-1. Count ALL players who have cards in front of them (face-up OR face-down).
-   Include players whose cards you cannot read. Do NOT count empty seats or folded players.
-   Report this count as total_players_at_table.
-2. Read the POT SIZE displayed in the center of the table (usually near the board cards).
-3. Look at the community cards (board) in the center of the table.
-4. Look at each player's hole cards (the two cards in front of each player).
-5. Read each player's CHIP STACK (the number shown near their seat).
-6. For each card, identify its RANK and SUIT separately, then report via the function.
+1. Read ALL PLAYER NAMES visible at the table. For each player, determine their status:
+   - "active" = player has cards in front of them (face-up or face-down card backs)
+   - "folded" = player's name is visible but they have NO cards next to them,
+     or their cards appear greyed-out / shaded / dimmed
+   Report every player in the table_players array with their name, status, and stack.
+2. Count the ACTIVE players (those with cards). Report as total_players_at_table.
+3. Read the POT SIZE displayed in the center of the table (usually near the board cards).
+4. Look at the community cards (board) in the center of the table.
+5. Look at each player's hole cards (the two cards in front of each player).
+6. Read each player's CHIP STACK (the number shown near their seat).
+7. For each card, identify its RANK and SUIT separately, then report via the function.
 
 CRITICAL -- READ CARDS ONE AT A TIME:
 - For each pair of hole cards, read the LEFT card FIRST, then the RIGHT card.
@@ -443,16 +491,38 @@ def detect_cards(
             continue
         players.append(PlayerHand(seat=p["seat"], cards=cards, stack=stack))
 
+    # Parse table_players (all players with name + active/folded status)
+    table_players: list[TablePlayer] = []
+    for tp in data.get("table_players", []):
+        name = tp.get("name", "").strip()
+        status = tp.get("status", "active").strip().lower()
+        if not name:
+            continue
+        if status not in ("active", "folded"):
+            status = "active"
+        tp_stack = None
+        if "stack" in tp:
+            try:
+                tp_stack = float(tp["stack"])
+            except (ValueError, TypeError):
+                tp_stack = None
+        table_players.append(TablePlayer(name=name, status=status, stack=tp_stack))
+
     result = DetectedCards(
         community_cards=community, players=players,
+        table_players=table_players,
         pot_size=pot_size, total_players=total_players,
     )
     _validate_no_duplicates(result)
 
     pot_str = f"  pot={result.pot_size}" if result.pot_size else ""
     tp_str = f"  total_players={result.total_players}" if result.total_players else ""
+    active_names = [tp.name for tp in table_players if tp.status == "active"]
+    folded_names = [tp.name for tp in table_players if tp.status == "folded"]
     print(f"[CardDetector] Detected: board={result.community_cards}  "
           f"players={[(p.seat, p.cards, p.stack) for p in result.players]}  "
           f"street={result.street}{pot_str}{tp_str}")
+    if table_players:
+        print(f"[CardDetector] Table: active={active_names}  folded={folded_names}")
 
     return result

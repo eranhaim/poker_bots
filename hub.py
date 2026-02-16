@@ -53,6 +53,12 @@ app = FastAPI(title="Poker Equity Hub")
 
 
 # ── Request / response models ────────────────────────────────────────
+class TablePlayerReport(BaseModel):
+    name: str
+    status: str                            # "active" or "folded"
+    stack: Optional[float] = None
+
+
 class HandReport(BaseModel):
     player_name: str
     hole_cards: list[str]                  # e.g. ["Ah", "Kd"]
@@ -61,6 +67,7 @@ class HandReport(BaseModel):
     stack: Optional[float] = None          # player's chip stack
     pot_size: Optional[float] = None       # current pot size
     total_players: Optional[int] = None    # total players with cards (from AI vision)
+    table_players: list[TablePlayerReport] = []  # all players with names + status
 
 
 class RecommendationResponse(BaseModel):
@@ -80,6 +87,8 @@ class StatusResponse(BaseModel):
     total_players: Optional[int]           # agreed total (from unanimous vote)
     unknown_players: int                   # total - known
     recommendations: dict[str, RecommendationResponse]  # player_name -> recommendation
+    folded_players: list[str]              # list of player names who folded
+    active_players: list[str]              # list of active player names
     players_connected: int
     last_update: Optional[str]
 
@@ -96,6 +105,10 @@ class HandState:
         self.total_players_votes: dict[str, int] = {}  # name -> reported total
         self.total_players: Optional[int] = None       # agreed-upon count
         self.recommendations: dict[str, Recommendation] = {}  # name -> rec
+        self.folded_players: set[str] = set()          # player names confirmed folded
+        self.active_players: set[str] = set()          # player names confirmed active
+        # Per-reporter votes: player_name -> {reporter_name -> "active"/"folded"}
+        self.player_status_votes: dict[str, dict[str, str]] = {}
         self.last_update: Optional[str] = None
         self._lock = threading.Lock()
 
@@ -110,6 +123,9 @@ class HandState:
             self.total_players_votes = {}
             self.total_players = None
             self.recommendations = {}
+            self.folded_players = set()
+            self.active_players = set()
+            self.player_status_votes = {}
             self.last_update = None
         logger.info("=" * 45)
         logger.info("NEW HAND #%d", hand_id)
@@ -200,6 +216,9 @@ class HandState:
                 self.total_players_votes = {}
                 self.total_players = None
                 self.recommendations = {}
+                self.folded_players = set()
+                self.active_players = set()
+                self.player_status_votes = {}
 
             # First hand auto-start (hub just started, hand_id is 0)
             if self.hand_id == 0:
@@ -261,6 +280,46 @@ class HandState:
                         self.total_players if self.total_players else "unknown",
                     )
 
+            # Update player status from table_players reports
+            if report.table_players:
+                for tp in report.table_players:
+                    name = tp.name.strip()
+                    if not name:
+                        continue
+                    status = tp.status.strip().lower()
+                    if status not in ("active", "folded"):
+                        status = "active"
+                    # Record this reporter's vote for this player
+                    if name not in self.player_status_votes:
+                        self.player_status_votes[name] = {}
+                    self.player_status_votes[name][report.player_name] = status
+                    # Also update stack from table_players if available
+                    if tp.stack is not None and name not in self.stacks:
+                        self.stacks[name] = tp.stack
+
+                # Recalculate folded/active sets from all votes
+                # A player is folded if ANY reporter says they're folded
+                # (folding is irreversible within a hand)
+                new_folded: set[str] = set()
+                new_active: set[str] = set()
+                for pname, votes in self.player_status_votes.items():
+                    if any(v == "folded" for v in votes.values()):
+                        new_folded.add(pname)
+                    else:
+                        new_active.add(pname)
+
+                # Log newly folded players
+                for pname in new_folded - self.folded_players:
+                    logger.info(
+                        "FOLD detected: %s (reported by %s)",
+                        pname,
+                        [r for r, v in self.player_status_votes[pname].items()
+                         if v == "folded"],
+                    )
+
+                self.folded_players = new_folded
+                self.active_players = new_active
+
             self.last_update = datetime.now().strftime("%H:%M:%S")
 
         # Log the report
@@ -295,21 +354,28 @@ class HandState:
             stacks_snapshot = dict(self.stacks)
             pot = self.pot_size
             total_pl = self.total_players
+            folded = set(self.folded_players)
 
-        n_known = len(players_snapshot)
-        n_unknown = max(0, total_pl - n_known) if total_pl is not None else 0
+        # Filter out folded players from equity calculation
+        active_players_snapshot = {
+            name: cards for name, cards in players_snapshot.items()
+            if name not in folded
+        }
+        n_active_known = len(active_players_snapshot)
+        n_known_total = len(players_snapshot)
+        n_unknown = max(0, total_pl - n_known_total) if total_pl is not None else 0
 
-        # Need at least 1 known player + at least 1 other (known or unknown)
-        if n_known == 0:
+        # Need at least 1 active known player + at least 1 other (known or unknown)
+        if n_active_known == 0:
             return
-        if n_known < 2 and n_unknown == 0:
+        if n_active_known < 2 and n_unknown == 0:
             return
 
-        # Build input for equity calculator
-        player_names = list(players_snapshot.keys())
+        # Build input for equity calculator (only active players)
+        active_names = list(active_players_snapshot.keys())
         player_hands = [
-            (i + 1, players_snapshot[name])
-            for i, name in enumerate(player_names)
+            (i + 1, active_players_snapshot[name])
+            for i, name in enumerate(active_names)
         ]
 
         try:
@@ -336,18 +402,23 @@ class HandState:
         with self._lock:
             self.equity = {}
             self.recommendations = {}
+
+            # Folded players get 0% equity, no recommendation
+            for name in folded:
+                self.equity[name] = 0.0
+
             for eq in equities:
                 if eq.seat == -1:
                     # Aggregate unknown-player equity
                     self.equity["Unknown"] = eq.equity
                     continue
-                # Map seat index back to player name
+                # Map seat index back to active player name
                 idx = eq.seat - 1
-                if 0 <= idx < len(player_names):
-                    name = player_names[idx]
+                if 0 <= idx < len(active_names):
+                    name = active_names[idx]
                     self.equity[name] = eq.equity
 
-                    # Strategy recommendation
+                    # Strategy recommendation (only for active players)
                     try:
                         rec = strategy_recommend(
                             player_name=name,
@@ -373,9 +444,12 @@ class HandState:
             total_pl = self.total_players
             recs = dict(self.recommendations)
             n_known = len(players)
+            folded = set(self.folded_players)
+            active = set(self.active_players)
 
         n_unknown = max(0, total_pl - n_known) if total_pl is not None else 0
         n_total = total_pl if total_pl is not None else n_known
+        n_folded = len(folded)
 
         board_str = " ".join(community) if community else "(preflop)"
         n_board = len(community)
@@ -388,6 +462,9 @@ class HandState:
         logger.info("|  HAND #%-5d  |  %-8s  |  Players: %-5s |  %-10s|%14s|",
                      hand_id, street, players_str, pot_str,
                      f"{n_unknown} unknown" if n_unknown > 0 else "")
+        if n_folded > 0:
+            logger.info("|  Folded: %-68s|",
+                         ", ".join(sorted(folded)))
         logger.info("+" + "-" * 78 + "+")
         logger.info("|  Board: %-69s|", board_str)
         logger.info("+" + "-" * 78 + "+")
@@ -395,7 +472,9 @@ class HandState:
         if not players and n_unknown == 0:
             logger.info("|  (no players have reported yet)%-47s|", "")
         else:
+            # Show active (known) players first
             for name, cards in players.items():
+                is_folded = name in folded
                 cards_str = " ".join(cards)
                 stack = stacks.get(name)
                 stack_str = f"{stack:,.0f}" if stack is not None else "--"
@@ -405,7 +484,12 @@ class HandState:
                 if rec and rec.sizing is not None:
                     rec_str += f" {rec.sizing:,.0f}"
 
-                if eq is not None:
+                if is_folded:
+                    logger.info(
+                        "|  %-12s  %-6s  |  Stack: %8s  |  FOLDED    0.0%%  |  %-12s|",
+                        name, cards_str, stack_str, "",
+                    )
+                elif eq is not None:
                     logger.info(
                         "|  %-12s  %-6s  |  Stack: %8s  |  Equity: %5.1f%%  |  %-12s|",
                         name, cards_str, stack_str, eq * 100, rec_str,
@@ -414,6 +498,16 @@ class HandState:
                     logger.info(
                         "|  %-12s  %-6s  |  Stack: %8s  |  (waiting)       |  %-12s|",
                         name, cards_str, stack_str, "",
+                    )
+
+            # Show folded players who are NOT in self.players (no cards reported by a client)
+            for name in sorted(folded):
+                if name not in players:
+                    stack = stacks.get(name)
+                    stack_str = f"{stack:,.0f}" if stack is not None else "--"
+                    logger.info(
+                        "|  %-12s  %-6s  |  Stack: %8s  |  FOLDED    0.0%%  |  %-12s|",
+                        name, "--", stack_str, "",
                     )
 
             # Show unknown player aggregate
@@ -462,6 +556,8 @@ class HandState:
                 total_players=self.total_players,
                 unknown_players=n_unknown,
                 recommendations=recs_resp,
+                folded_players=sorted(self.folded_players),
+                active_players=sorted(self.active_players),
                 players_connected=n_known,
                 last_update=self.last_update,
             )
