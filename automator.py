@@ -263,7 +263,37 @@ def _execute_bet_raise(
         print(f"[Automator] DONE: {action_label} {sizing_str}")
         return True
 
-    print(f"[Automator] WARNING: Could not find BET confirm button after typing amount")
+    # Confirm button not found -- the typed amount is probably illegal.
+    # Fallback: click MIN RAISE to set a legal amount, then try confirm again.
+    print(f"[Automator] WARNING: BET confirm not found (illegal sizing?). "
+          f"Falling back to MIN RAISE ...")
+    minraise_pos = find_button("minraise")
+    if minraise_pos is not None:
+        mx, my = minraise_pos
+        print(f"[Automator] Clicking MIN RAISE at ({mx}, {my}) ...")
+        pyautogui.click(mx, my)
+        time.sleep(0.5)
+
+        # Try confirm button again
+        bet_pos2 = find_button(_BET_CONFIRM_TEMPLATE)
+        if bet_pos2 is not None:
+            bx, by = bet_pos2
+            print(f"[Automator] Clicking BET confirm at ({bx}, {by}) ...")
+            time.sleep(0.3)
+            pyautogui.click(bx, by)
+            print(f"[Automator] DONE: {action_label} with MIN RAISE (original {sizing_str} was illegal)")
+            return True
+
+    # Still can't confirm -- click BACK to close the panel cleanly
+    print(f"[Automator] WARNING: Could not confirm bet. Clicking BACK to close panel ...")
+    back_pos = find_button("back")
+    if back_pos is not None:
+        pyautogui.click(back_pos[0], back_pos[1])
+        print(f"[Automator] Closed bet panel via BACK")
+    else:
+        pyautogui.press("escape")
+        print(f"[Automator] Pressed ESC to close bet panel")
+
     return False
 
 
