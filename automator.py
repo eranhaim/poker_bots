@@ -145,7 +145,21 @@ def execute_action(
     bool
         True if the action was executed successfully, False otherwise.
     """
-    action_title = action.strip().title()
+    action_clean = action.strip()
+
+    # Handle compound actions like "Check/Fold", "Call/Fold", "Bet/Raise"
+    # These mean "try the first action, if not available try the second"
+    if "/" in action_clean:
+        parts = [a.strip() for a in action_clean.split("/")]
+        print(f"[Automator] Compound action: {parts} -- trying in order")
+        for part in parts:
+            result = execute_action(part, sizing=sizing, delay=delay)
+            if result:
+                return True
+        print(f"[Automator] SKIP: None of {parts} found on screen")
+        return False
+
+    action_title = action_clean.title()
     if action_title not in _ACTION_TEMPLATES:
         # Try matching common variations
         action_map = {
