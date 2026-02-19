@@ -127,9 +127,16 @@ def _maybe_auto_play(hub_response: dict | None, auto_play: bool, action_delay: f
     sizing = rec.get("sizing")
     confidence = rec.get("confidence", "?")
 
-    print(f"[Client] AUTO-PLAY: {action}"
-          f"{f' {sizing}' if sizing is not None else ''}"
-          f"  [{confidence}]")
+    # Color-coded action display
+    _action_colors = {
+        "Fold": "\033[91m", "Check": "\033[92m", "Call": "\033[93m",
+        "Bet": "\033[96m", "Raise": "\033[95m", "All-in": "\033[91;1m",
+    }
+    _rst = "\033[0m"
+    base_action = action.split("/")[0].strip().title() if "/" in action else action.strip().title()
+    color = _action_colors.get(base_action, "")
+    sizing_str = f" {sizing}" if sizing is not None else ""
+    print(f"[Client] AUTO-PLAY: \033[1m{color}{action}{sizing_str}{_rst}  [{confidence}]")
 
     try:
         from automator import execute_action

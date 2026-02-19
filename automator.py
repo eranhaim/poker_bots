@@ -41,6 +41,30 @@ import pyautogui
 # Disable PyAutoGUI's fail-safe pause (we handle delays ourselves)
 pyautogui.PAUSE = 0.1
 
+# ── ANSI colors for console output ────────────────────────────────────
+_COLORS = {
+    "Fold":   "\033[91m",   # bright red
+    "Check":  "\033[92m",   # bright green
+    "Call":   "\033[93m",   # bright yellow
+    "Bet":    "\033[96m",   # bright cyan
+    "Raise":  "\033[95m",   # bright magenta
+    "All-in": "\033[91;1m", # bold bright red
+}
+_RESET = "\033[0m"
+_BOLD = "\033[1m"
+_DIM = "\033[2m"
+_GREEN = "\033[92m"
+_RED = "\033[91m"
+_YELLOW = "\033[93m"
+
+
+def _color_action(action: str, sizing: Optional[float] = None) -> str:
+    """Return the action string wrapped in its ANSI color."""
+    color = _COLORS.get(action, "")
+    sizing_str = f" {sizing}" if sizing is not None else ""
+    return f"{_BOLD}{color}{action}{sizing_str}{_RESET}"
+
+
 # ── Configuration ─────────────────────────────────────────────────────
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 CONFIDENCE_THRESHOLD = 0.8
@@ -175,8 +199,7 @@ def execute_action(
 
     template_names = _ACTION_TEMPLATES[action_title]
 
-    print(f"[Automator] Executing: {action_title}"
-          f"{f' (sizing={sizing})' if sizing is not None else ''}")
+    print(f"[Automator] Executing: {_color_action(action_title, sizing)}")
 
     # For Bet/Raise with sizing: first type the amount, then click confirm
     if action_title in ("Bet", "Raise") and sizing is not None:
@@ -202,11 +225,11 @@ def _click_button(
         return False
 
     x, y, matched = match
-    print(f"[Automator] Clicking {action_label} ({matched}) at ({x}, {y}) "
-          f"in {delay:.1f}s ...")
+    print(f"[Automator] Clicking {_color_action(action_label)} "
+          f"{_DIM}({matched}) at ({x}, {y}) in {delay:.1f}s ...{_RESET}")
     time.sleep(delay)
     pyautogui.click(x, y)
-    print(f"[Automator] DONE: Clicked {action_label}")
+    print(f"{_GREEN}[Automator] DONE: {_color_action(action_label)}{_RESET}")
     return True
 
 
@@ -230,8 +253,8 @@ def _execute_bet_raise(
         return False
 
     x, y, matched = match
-    print(f"[Automator] Clicking {action_label} ({matched}) at ({x}, {y}) "
-          f"in {delay:.1f}s to open bet panel ...")
+    print(f"[Automator] Clicking {_color_action(action_label)} "
+          f"{_DIM}({matched}) at ({x}, {y}) in {delay:.1f}s to open bet panel ...{_RESET}")
     time.sleep(delay)
     pyautogui.click(x, y)
     print(f"[Automator] Bet panel should be open now, waiting for it ...")
@@ -260,7 +283,7 @@ def _execute_bet_raise(
         print(f"[Automator] Clicking BET confirm at ({bx}, {by}) ...")
         time.sleep(0.3)
         pyautogui.click(bx, by)
-        print(f"[Automator] DONE: {action_label} {sizing_str}")
+        print(f"{_GREEN}[Automator] DONE: {_color_action(action_label, sizing)}{_RESET}")
         return True
 
     # Confirm button not found -- the typed amount is probably illegal.
@@ -281,7 +304,8 @@ def _execute_bet_raise(
             print(f"[Automator] Clicking BET confirm at ({bx}, {by}) ...")
             time.sleep(0.3)
             pyautogui.click(bx, by)
-            print(f"[Automator] DONE: {action_label} with MIN RAISE (original {sizing_str} was illegal)")
+            print(f"{_YELLOW}[Automator] DONE: {_color_action(action_label)} "
+              f"with MIN RAISE (original {sizing_str} was illegal){_RESET}")
             return True
 
     # Still can't confirm -- click BACK to close the panel cleanly
@@ -303,10 +327,11 @@ def _execute_allin(template_names: list[str], delay: float) -> bool:
     allin_pos = find_button("allin")
     if allin_pos is not None:
         x, y = allin_pos
-        print(f"[Automator] Clicking All-in at ({x}, {y}) in {delay:.1f}s ...")
+        print(f"[Automator] Clicking {_color_action('All-in')} "
+              f"{_DIM}at ({x}, {y}) in {delay:.1f}s ...{_RESET}")
         time.sleep(delay)
         pyautogui.click(x, y)
-        print("[Automator] DONE: Clicked All-in")
+        print(f"{_GREEN}[Automator] DONE: {_color_action('All-in')}{_RESET}")
         return True
 
     # Fall back to raise button (ClubGG sometimes shows "All-in" as the raise button)
