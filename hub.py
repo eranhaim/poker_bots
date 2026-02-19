@@ -297,24 +297,38 @@ class HandState:
                     if tp.stack is not None and name not in self.stacks:
                         self.stacks[name] = tp.stack
 
-                # Recalculate folded/active sets from all votes
-                # A player is folded if ANY reporter says they're folded
-                # (folding is irreversible within a hand)
+                # Recalculate folded/active sets from votes.
+                # Two modes:
+                #   - Player has their own client (in self.players): only
+                #     trust their OWN report (their screen shows greyed cards)
+                #   - Player has NO client: trust other players' reports
+                #     (on their screens, a folded player has no cards)
                 new_folded: set[str] = set()
                 new_active: set[str] = set()
                 for pname, votes in self.player_status_votes.items():
-                    if any(v == "folded" for v in votes.values()):
-                        new_folded.add(pname)
+                    has_own_client = pname in self.players
+                    if has_own_client:
+                        self_vote = votes.get(pname)
+                        if self_vote == "folded":
+                            new_folded.add(pname)
+                        else:
+                            new_active.add(pname)
                     else:
-                        new_active.add(pname)
+                        # No own client -- trust majority of other reporters
+                        fold_votes = sum(1 for v in votes.values() if v == "folded")
+                        if fold_votes > len(votes) / 2:
+                            new_folded.add(pname)
+                        else:
+                            new_active.add(pname)
 
                 # Log newly folded players
                 for pname in new_folded - self.folded_players:
+                    has_own = pname in self.players
                     logger.info(
-                        "FOLD detected: %s (reported by %s)",
+                        "FOLD detected: %s (%s)",
                         pname,
-                        [r for r, v in self.player_status_votes[pname].items()
-                         if v == "folded"],
+                        "self-reported" if has_own else
+                        f"reported by other clients: {[r for r, v in self.player_status_votes[pname].items() if v == 'folded']}",
                     )
 
                 self.folded_players = new_folded

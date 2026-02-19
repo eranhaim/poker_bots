@@ -67,7 +67,7 @@ def _color_action(action: str, sizing: Optional[float] = None) -> str:
 
 # ── Configuration ─────────────────────────────────────────────────────
 TEMPLATES_DIR = Path(__file__).parent / "templates"
-CONFIDENCE_THRESHOLD = 0.8
+CONFIDENCE_THRESHOLD = 0.65
 DEFAULT_ACTION_DELAY = 1.0  # seconds to wait before clicking
 
 # Map action names to template filenames (without extension)
