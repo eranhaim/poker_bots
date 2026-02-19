@@ -73,17 +73,25 @@ DEFAULT_ACTION_DELAY = 1.0  # seconds to wait before clicking
 # Map action names to template filenames (without extension)
 # These are the INITIAL buttons in the main action bar:
 _ACTION_TEMPLATES: dict[str, list[str]] = {
-    "Fold":   ["fold"],
-    "Check":  ["check"],
-    "Call":   ["call"],
-    "Bet":    ["betstart", "raise"],  # "betstart" = BET in main bar (opens panel)
-    "Raise":  ["raise", "betstart"],  # "raise" = RAISE in main bar (opens panel)
-    "All-in": ["allin", "raise", "betstart"],
+    "Fold":      ["fold"],
+    "Check":     ["check"],
+    "Call":      ["call"],
+    "Bet":       ["bet"],              # BET confirm button (also used to submit)
+    "Raise":     ["raise"],            # RAISE confirm button (also used to submit)
+    "Checkfold": ["checkfold"],        # the "Check/Fold" preset button in ClubGG
 }
 
-# Template for the CONFIRM button inside the bet panel (green BET button)
-_BET_CONFIRM_TEMPLATE = "bet"
-# Template for the bet/raise input field inside the panel
+# Fallback actions: if the primary action's button isn't on screen,
+# try the equivalent action (e.g. Call -> Check when no bet was placed)
+_ACTION_FALLBACKS: dict[str, str] = {
+    "Call":  "Check",      # no bet placed -> just check
+    "Check": "Call",       # bet was placed -> call (rare, but covers edge case)
+    "Raise": "Bet",        # no bet placed -> initiate a bet instead
+    "Bet":   "Raise",      # bet already placed -> raise instead
+    "Fold":  "Checkfold",  # no bet placed -> check/fold button
+}
+
+# Template for the bet/raise input field
 _BET_INPUT_TEMPLATE = "betinput"
 
 
@@ -187,8 +195,8 @@ def execute_action(
     if action_title not in _ACTION_TEMPLATES:
         # Try matching common variations
         action_map = {
-            "All-In": "All-in", "Allin": "All-in", "All In": "All-in",
-            "Shove": "All-in",
+            "All-In": "Raise", "All-in": "Raise", "Allin": "Raise",
+            "All In": "Raise", "Shove": "Raise",
         }
         action_title = action_map.get(action_title, action_title)
 
@@ -201,15 +209,31 @@ def execute_action(
 
     print(f"[Automator] Executing: {_color_action(action_title, sizing)}")
 
-    # For Bet/Raise with sizing: first type the amount, then click confirm
+    success = _execute_single(action_title, sizing, template_names, delay)
+
+    # If the primary action failed, try the fallback action
+    if not success and action_title in _ACTION_FALLBACKS:
+        fallback = _ACTION_FALLBACKS[action_title]
+        fallback_templates = _ACTION_TEMPLATES.get(fallback, [])
+        print(f"[Automator] {_YELLOW}Falling back: "
+              f"{_color_action(action_title)} -> {_color_action(fallback, sizing)}{_RESET}")
+        success = _execute_single(fallback, sizing, fallback_templates, delay)
+
+    return success
+
+
+def _execute_single(
+    action_title: str,
+    sizing: Optional[float],
+    template_names: list[str],
+    delay: float,
+) -> bool:
+    """Execute a single action (no fallback logic)."""
+    # For Bet/Raise with sizing: click input, type amount, click button
     if action_title in ("Bet", "Raise") and sizing is not None:
         return _execute_bet_raise(action_title, sizing, template_names, delay)
 
-    # For All-in: try the allin button first, fall back to raise
-    if action_title == "All-in":
-        return _execute_allin(template_names, delay)
-
-    # Simple click actions: Fold, Check, Call
+    # Simple click actions: Fold, Check, Call, Checkfold
     return _click_button(template_names, action_title, delay)
 
 
@@ -239,34 +263,30 @@ def _execute_bet_raise(
     button_templates: list[str],
     delay: float,
 ) -> bool:
-    """Click Raise/Bet to open the panel, type the amount, then click BET to confirm.
+    """Click the bet input, type the amount, then click the Bet/Raise button.
 
     ClubGG flow:
-      1. Click RAISE/BET button -> opens the bet panel with input focused
-      2. Type the desired amount (input already has focus)
-      3. Click the BET confirm button to submit
+      1. Click the bet input field to focus it
+      2. Clear and type the desired amount
+      3. Click the Bet or Raise button to submit
     """
-    # Step 1: Click the Raise/Bet button to open the bet panel
-    match = _find_first_button(button_templates)
-    if match is None:
-        print(f"[Automator] SKIP: Could not find {action_label} button on screen")
-        return False
+    # Step 1: Find and click the bet input field
+    input_pos = find_button(_BET_INPUT_TEMPLATE)
+    if input_pos is None:
+        print(f"[Automator] WARNING: Bet input field not found. "
+              f"Clicking {action_label} button directly (default sizing).")
+        return _click_button(button_templates, action_label, delay)
 
-    x, y, matched = match
-    print(f"[Automator] Clicking {_color_action(action_label)} "
-          f"{_DIM}({matched}) at ({x}, {y}) in {delay:.1f}s to open bet panel ...{_RESET}")
-    time.sleep(delay)
-    pyautogui.click(x, y)
-    print(f"[Automator] Bet panel should be open now, waiting for it ...")
-    time.sleep(1.0)
+    ix, iy = input_pos
+    print(f"[Automator] Clicking bet input at ({ix}, {iy}) ...")
+    time.sleep(delay * 0.5)
+    pyautogui.click(ix, iy)
+    time.sleep(0.3)
 
-    # Step 2: Type the sizing amount
-    # The input field should already have focus after clicking Raise/Bet.
-    # Select all existing text and replace with our amount.
+    # Step 2: Clear existing value and type new amount
     pyautogui.hotkey("ctrl", "a")
     time.sleep(0.1)
 
-    # Format sizing: use integer if whole number, else 2 decimal places
     if sizing == int(sizing):
         sizing_str = str(int(sizing))
     else:
@@ -276,67 +296,42 @@ def _execute_bet_raise(
     print(f"[Automator] Typed sizing: {sizing_str}")
     time.sleep(0.5)
 
-    # Step 3: Click the BET confirm button inside the panel
-    bet_pos = find_button(_BET_CONFIRM_TEMPLATE)
-    if bet_pos is not None:
-        bx, by = bet_pos
-        print(f"[Automator] Clicking BET confirm at ({bx}, {by}) ...")
+    # Step 3: Click the Bet/Raise button to confirm
+    match = _find_first_button(button_templates)
+    if match is not None:
+        bx, by, matched = match
+        print(f"[Automator] Clicking {_color_action(action_label)} "
+              f"{_DIM}({matched}) at ({bx}, {by}) ...{_RESET}")
         time.sleep(0.3)
         pyautogui.click(bx, by)
         print(f"{_GREEN}[Automator] DONE: {_color_action(action_label, sizing)}{_RESET}")
         return True
 
-    # Confirm button not found -- the typed amount is probably illegal.
-    # Fallback: click MIN RAISE to set a legal amount, then try confirm again.
-    print(f"[Automator] WARNING: BET confirm not found (illegal sizing?). "
-          f"Falling back to MIN RAISE ...")
-    minraise_pos = find_button("minraise")
-    if minraise_pos is not None:
-        mx, my = minraise_pos
-        print(f"[Automator] Clicking MIN RAISE at ({mx}, {my}) ...")
-        pyautogui.click(mx, my)
-        time.sleep(0.5)
-
-        # Try confirm button again
-        bet_pos2 = find_button(_BET_CONFIRM_TEMPLATE)
-        if bet_pos2 is not None:
-            bx, by = bet_pos2
-            print(f"[Automator] Clicking BET confirm at ({bx}, {by}) ...")
-            time.sleep(0.3)
-            pyautogui.click(bx, by)
-            print(f"{_YELLOW}[Automator] DONE: {_color_action(action_label)} "
-              f"with MIN RAISE (original {sizing_str} was illegal){_RESET}")
-            return True
-
-    # Still can't confirm -- click BACK to close the panel cleanly
-    print(f"[Automator] WARNING: Could not confirm bet. Clicking BACK to close panel ...")
-    back_pos = find_button("back")
-    if back_pos is not None:
-        pyautogui.click(back_pos[0], back_pos[1])
-        print(f"[Automator] Closed bet panel via BACK")
-    else:
-        pyautogui.press("escape")
-        print(f"[Automator] Pressed ESC to close bet panel")
-
-    return False
-
-
-def _execute_allin(template_names: list[str], delay: float) -> bool:
-    """Execute an all-in action."""
-    # Try dedicated all-in button first
-    allin_pos = find_button("allin")
-    if allin_pos is not None:
-        x, y = allin_pos
-        print(f"[Automator] Clicking {_color_action('All-in')} "
-              f"{_DIM}at ({x}, {y}) in {delay:.1f}s ...{_RESET}")
-        time.sleep(delay)
-        pyautogui.click(x, y)
-        print(f"{_GREEN}[Automator] DONE: {_color_action('All-in')}{_RESET}")
+    # Bet/Raise button not found -- the typed amount may be illegal.
+    # Fallback: try to just Call instead.
+    print(f"[Automator] {_YELLOW}WARNING: {action_label} button not found "
+          f"(illegal sizing?). Falling back to Call ...{_RESET}")
+    call_pos = find_button("call")
+    if call_pos is not None:
+        cx, cy = call_pos
+        time.sleep(0.3)
+        pyautogui.click(cx, cy)
+        print(f"{_YELLOW}[Automator] DONE: {_color_action('Call')} "
+              f"(fallback from {action_label} {sizing_str}){_RESET}")
         return True
 
-    # Fall back to raise button (ClubGG sometimes shows "All-in" as the raise button)
-    print("[Automator] No dedicated All-in button, trying Raise button ...")
-    return _click_button(["raise", "bet"], "All-in", delay)
+    # No Call either -- try Check
+    check_pos = find_button("check")
+    if check_pos is not None:
+        cx, cy = check_pos
+        time.sleep(0.3)
+        pyautogui.click(cx, cy)
+        print(f"{_YELLOW}[Automator] DONE: {_color_action('Check')} "
+              f"(fallback from {action_label} {sizing_str}){_RESET}")
+        return True
+
+    print(f"[Automator] {_RED}WARNING: Could not complete bet or find fallback.{_RESET}")
+    return False
 
 
 # ── Template capture utility ─────────────────────────────────────────
